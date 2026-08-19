@@ -17,23 +17,13 @@ function hasBlobToken() {
 }
 
 async function blobLoad() {
-  const { head } = await import('@vercel/blob');
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
-
-  let downloadUrl;
-  try {
-    const info = await head(BLOB_PATHNAME);
-    downloadUrl = info.downloadUrl;
-  } catch {
-    return null;
-  }
+  const { get } = await import('@vercel/blob');
 
   try {
-    const res = await fetch(downloadUrl, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) return null;
-    return res.json();
+    const res = await get(BLOB_PATHNAME, { access: 'private' });
+    if (!res) return null;
+    const text = await res.text();
+    return JSON.parse(text);
   } catch {
     return null;
   }
