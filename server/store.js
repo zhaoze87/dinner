@@ -6,30 +6,37 @@ import { migrateMenuOwnership } from './menus.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, '..', 'data');
 const dbFile = path.join(dataDir, 'db.json');
-const DB_KEY = 'kaifan:db';
+const BLOB_PATHNAME = 'kaifan-db.json';
 
-const empty = () => ({
-  users: [],
-  groups: [],
-});
+const empty = () => ({ users: [], groups: [] });
 
-function redisConfig() {
-  const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
-  if (!url || !token) return null;
-  return { url, token };
+// ── Vercel Blob ──────────────────────────────────────────────────────────────
+
+function hasBlobToken() {
+  return Boolean(process.env.BLOB_READ_WRITE_TOKEN);
 }
 
-let redisClient;
-
-async function getRedis() {
-  if (redisClient) return redisClient;
-  const config = redisConfig();
-  if (!config) return null;
-  const { Redis } = await import('@upstash/redis');
-  redisClient = new Redis(config);
-  return redisClient;
+async function blobLoad() {
+  const { list, head } = await import('@vercel/blob');
+  const { blobs } = await list({ prefix: BLOB_PATHNAME });
+  if (!blobs.length) return null;
+  const url = blobs[0].url;
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) return null;
+  return res.json().catch(() => null);
 }
+
+async function blobSave(data) {
+  const { put } = await import('@vercel/blob');
+  await put(BLOB_PATHNAME, JSON.stringify(data), {
+    access: 'public',
+    contentType: 'application/json',
+    addRandomSuffix: false,
+    allowOverwrite: true,
+  });
+}
+
+// ── Local file ───────────────────────────────────────────────────────────────
 
 function ensureFile() {
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
@@ -52,13 +59,14 @@ function saveFile(data) {
   fs.renameSync(tmp, dbFile);
 }
 
+// ── Unified load / save ──────────────────────────────────────────────────────
+
 let fileCache = null;
 
 async function load() {
-  const redis = await getRedis();
-  if (redis) {
-    const data = (await redis.get(DB_KEY)) || empty();
-    if (migrateMenuOwnership(data)) await save(data);
+  if (hasBlobToken()) {
+    const data = (await blobLoad()) || empty();
+    if (migrateMenuOwnership(data)) await blobSave(data);
     return data;
   }
   if (!fileCache) {
@@ -69,14 +77,15 @@ async function load() {
 }
 
 async function save(data) {
-  const redis = await getRedis();
-  if (redis) {
-    await redis.set(DB_KEY, data);
+  if (hasBlobToken()) {
+    await blobSave(data);
     return;
   }
   fileCache = data;
   saveFile(data);
 }
+
+// ── Public API ───────────────────────────────────────────────────────────────
 
 export const db = {
   async read() {
@@ -88,7 +97,7 @@ export const db = {
     await save(data);
     return data;
   },
-  usesRedis() {
-    return Boolean(redisConfig());
+  storageType() {
+    return hasBlobToken() ? 'blob' : 'file';
   },
 };

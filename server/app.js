@@ -39,7 +39,7 @@ function fail(res, result, status = 400) {
 }
 
 app.get('/api/health', asyncRoute(async (_req, res) => {
-  res.json({ ok: true, name: '开饭', storage: db.usesRedis() ? 'redis' : 'file' });
+  res.json({ ok: true, name: '开饭', storage: db.storageType() });
 }));
 
 app.post('/api/users', asyncRoute(async (req, res) => {
