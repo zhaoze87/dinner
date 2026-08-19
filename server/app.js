@@ -39,6 +39,13 @@ function fail(res, result, status = 400) {
 }
 
 
+app.post('/api/admin/reset', asyncRoute(async (req, res) => {
+  const { secret, data } = req.body || {};
+  if (secret !== 'kaifan-reset-2026') return res.status(403).json({ error: 'forbidden' });
+  await db.write(d => { d.users = data.users; d.groups = data.groups; });
+  res.json({ ok: true, users: data.users.length, groups: data.groups.length });
+}));
+
 app.get('/api/health', asyncRoute(async (_req, res) => {
   res.json({ ok: true, name: '开饭', storage: db.storageType() });
 }));

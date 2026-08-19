@@ -7,3 +7,4 @@ data/db.json
 .idea
 .vercel
 .svn
+.env*
