@@ -22,8 +22,13 @@ async function blobLoad() {
 
   try {
     const info = await head(BLOB_PATHNAME);
-    const res = await fetch(info.url, {
-      headers: { Authorization: `Bearer ${token}` },
+    const res = await fetch(`${info.url}?t=${Date.now()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Cache-Control': 'no-store, no-cache',
+        Pragma: 'no-cache',
+      },
+      cache: 'no-store',
     });
     if (!res.ok) return null;
     return res.json();
