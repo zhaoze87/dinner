@@ -38,32 +38,6 @@ function fail(res, result, status = 400) {
   return false;
 }
 
-app.get('/api/debug/blob', asyncRoute(async (_req, res) => {
-  const { head, get } = await import('@vercel/blob');
-  try {
-    const info = await head('kaifan-db.json');
-    // try sdk get
-    let sdkResult = null;
-    let sdkError = null;
-    try {
-      const r = await get('kaifan-db.json', { access: 'private' });
-      if (r && r.stream) {
-        const reader = r.stream.getReader();
-        const chunks = [];
-        let d = false;
-        while (!d) { const {value,done} = await reader.read(); if(value) chunks.push(value); d=done; }
-        sdkResult = Buffer.concat(chunks.map(c=>Buffer.from(c))).toString('utf8').slice(0,200);
-      }
-    } catch(e) { sdkError = String(e); }
-    // try bearer token
-    const token = process.env.BLOB_READ_WRITE_TOKEN;
-    const r2 = await fetch(info.url, { headers: { Authorization: `Bearer ${token}` } });
-    const t2 = await r2.text();
-    res.json({ info: { size: info.size, uploadedAt: info.uploadedAt, url: info.url.slice(0,60) }, bearerStatus: r2.status, bearerPreview: t2.slice(0,100), sdkResult, sdkError });
-  } catch (e) {
-    res.json({ error: String(e) });
-  }
-}));
 
 app.get('/api/health', asyncRoute(async (_req, res) => {
   res.json({ ok: true, name: '开饭', storage: db.storageType() });
@@ -189,7 +163,7 @@ app.delete('/api/users/:id/menus/:menuId', asyncRoute(async (req, res) => {
 
 app.use((err, _req, res, _next) => {
   console.error(err);
-  res.status(500).json({ error: '服务器开小差了', detail: String(err?.message || err) });
+  res.status(500).json({ error: '服务器开小差了' });
 });
 
 export default app;
