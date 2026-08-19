@@ -49,6 +49,7 @@ async function blobSave(data) {
     access: 'public',
     contentType: 'application/json',
     addRandomSuffix: false,
+    allowOverwrite: true,
   });
   blobUrl = result.url;
 }
