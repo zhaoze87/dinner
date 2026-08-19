@@ -38,6 +38,18 @@ function fail(res, result, status = 400) {
   return false;
 }
 
+app.get('/api/debug/blob', asyncRoute(async (_req, res) => {
+  const { head } = await import('@vercel/blob');
+  try {
+    const info = await head('kaifan-db.json');
+    const r = await fetch(info.downloadUrl);
+    const text = await r.text();
+    res.json({ info, status: r.status, preview: text.slice(0, 200) });
+  } catch (e) {
+    res.json({ error: String(e) });
+  }
+}));
+
 app.get('/api/health', asyncRoute(async (_req, res) => {
   res.json({ ok: true, name: '开饭', storage: db.storageType() });
 }));
