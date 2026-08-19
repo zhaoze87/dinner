@@ -10,33 +10,50 @@ const BLOB_PATHNAME = 'kaifan-db.json';
 
 const empty = () => ({ users: [], groups: [] });
 
-// ── Vercel Blob ──────────────────────────────────────────────────────────────
+// ── Vercel Blob ───────────────────────────────────────────────────────────────
 
 function hasBlobToken() {
   return Boolean(process.env.BLOB_READ_WRITE_TOKEN);
 }
 
+let blobUrl = null;
+
 async function blobLoad() {
-  const { list, head } = await import('@vercel/blob');
-  const { blobs } = await list({ prefix: BLOB_PATHNAME });
-  if (!blobs.length) return null;
-  const url = blobs[0].url;
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) return null;
-  return res.json().catch(() => null);
+  const { put, head } = await import('@vercel/blob');
+
+  // Try to find the existing blob URL if we don't have it cached
+  if (!blobUrl) {
+    try {
+      const info = await head(BLOB_PATHNAME);
+      blobUrl = info.url;
+    } catch {
+      // Blob doesn't exist yet; will be created on first save
+      return null;
+    }
+  }
+
+  try {
+    const res = await fetch(blobUrl + `?t=${Date.now()}`, {
+      headers: { 'Cache-Control': 'no-store' },
+    });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
 }
 
 async function blobSave(data) {
   const { put } = await import('@vercel/blob');
-  await put(BLOB_PATHNAME, JSON.stringify(data), {
+  const result = await put(BLOB_PATHNAME, JSON.stringify(data), {
     access: 'public',
     contentType: 'application/json',
     addRandomSuffix: false,
-    allowOverwrite: true,
   });
+  blobUrl = result.url;
 }
 
-// ── Local file ───────────────────────────────────────────────────────────────
+// ── Local file ────────────────────────────────────────────────────────────────
 
 function ensureFile() {
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
@@ -59,7 +76,7 @@ function saveFile(data) {
   fs.renameSync(tmp, dbFile);
 }
 
-// ── Unified load / save ──────────────────────────────────────────────────────
+// ── Unified load / save ───────────────────────────────────────────────────────
 
 let fileCache = null;
 
@@ -85,7 +102,7 @@ async function save(data) {
   saveFile(data);
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// ── Public API ────────────────────────────────────────────────────────────────
 
 export const db = {
   async read() {
