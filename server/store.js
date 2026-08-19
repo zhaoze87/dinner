@@ -16,25 +16,21 @@ function hasBlobToken() {
   return Boolean(process.env.BLOB_READ_WRITE_TOKEN);
 }
 
-let blobUrl = null;
-
 async function blobLoad() {
-  const { put, head } = await import('@vercel/blob');
+  const { head } = await import('@vercel/blob');
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
 
-  // Try to find the existing blob URL if we don't have it cached
-  if (!blobUrl) {
-    try {
-      const info = await head(BLOB_PATHNAME);
-      blobUrl = info.url;
-    } catch {
-      // Blob doesn't exist yet; will be created on first save
-      return null;
-    }
+  let downloadUrl;
+  try {
+    const info = await head(BLOB_PATHNAME);
+    downloadUrl = info.downloadUrl;
+  } catch {
+    return null;
   }
 
   try {
-    const res = await fetch(blobUrl + `?t=${Date.now()}`, {
-      headers: { 'Cache-Control': 'no-store' },
+    const res = await fetch(downloadUrl, {
+      headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) return null;
     return res.json();
@@ -45,13 +41,12 @@ async function blobLoad() {
 
 async function blobSave(data) {
   const { put } = await import('@vercel/blob');
-  const result = await put(BLOB_PATHNAME, JSON.stringify(data), {
-    access: 'public',
+  await put(BLOB_PATHNAME, JSON.stringify(data), {
+    access: 'private',
     contentType: 'application/json',
     addRandomSuffix: false,
     allowOverwrite: true,
   });
-  blobUrl = result.url;
 }
 
 // ── Local file ────────────────────────────────────────────────────────────────
