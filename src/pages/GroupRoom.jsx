@@ -1,0 +1,380 @@
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { api, loadUser } from '../lib/api.js';
+import { roomActions, startRoomSync } from '../lib/realtime.js';
+import Kitchen from '../components/Kitchen.jsx';
+import Toasts from '../components/Toasts.jsx';
+import Wheel from '../components/Wheel.jsx';
+
+function hue(name) {
+  let h = 0;
+  for (const ch of name || '') h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return `hsl(${h} 55% 62%)`;
+}
+
+function formatWhen(at) {
+  return new Date(at).toLocaleString('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+export default function GroupRoom() {
+  const { code } = useParams();
+  const navigate = useNavigate();
+  const user = useMemo(() => loadUser(), []);
+  const [group, setGroup] = useState(null);
+  const [error, setError] = useState('');
+  const [kitchen, setKitchen] = useState(false);
+  const [toasts, setToasts] = useState([]);
+  const [copied, setCopied] = useState(false);
+
+  const isLeader = group?.leaderId === user?.id;
+  const session = group?.session;
+  const myVote = session?.votes.find((v) => v.userId === user?.id);
+  const myReady = session?.ready?.includes(user?.id);
+  const weights = session?.weights || group?.weights || [];
+  const maxWeight = Math.max(1, ...weights.map((w) => w.weight));
+
+  useEffect(() => {
+    if (!user?.id) {
+      navigate('/');
+      return undefined;
+    }
+    let alive = true;
+
+    async function boot() {
+      try {
+        const { group: next } = await api('/api/groups/join', {
+          method: 'POST',
+          body: { userId: user.id, code },
+        });
+        if (alive) setGroup(next);
+      } catch (err) {
+        if (alive) setError(err.message);
+      }
+    }
+
+    boot();
+
+    const stop = startRoomSync({
+      code,
+      userId: user.id,
+      onGroup: (next) => {
+        if (!next.members.some((m) => m.userId === user.id)) {
+          navigate('/', { replace: true, state: { notice: '你已被移出本桌' } });
+          return;
+        }
+        setGroup(next);
+      },
+      onNotify: (item) => {
+        setToasts((prev) => [...prev.slice(-5), item]);
+        if (
+          item.type === 'session-start'
+          && typeof Notification !== 'undefined'
+          && Notification.permission === 'granted'
+        ) {
+          new Notification(item.title, { body: item.message });
+        }
+      },
+      onKicked: ({ message }) => {
+        navigate('/', { replace: true, state: { notice: message || '你已被移出本桌' } });
+      },
+      onError: (message) => setError(message),
+    });
+
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+
+    return () => {
+      alive = false;
+      stop();
+    };
+  }, [code, navigate, user?.id]);
+
+  async function runAction(action) {
+    setError('');
+    try {
+      const next = await action();
+      if (next) setGroup(next);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  function kickMember(member) {
+    if (!window.confirm(`确定把 ${member.name} 请离本桌？`)) return;
+    runAction(() => roomActions.kick(code, user.id, member.userId));
+  }
+
+  async function copyCode() {
+    try {
+      await navigator.clipboard.writeText(group.code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  if (error && !group) {
+    return (
+      <div className="stage landing">
+        <div className="landing-card">
+          <h1 className="brand">走错桌了</h1>
+          <p>{error}</p>
+          <Link className="btn btn-primary" to="/" style={{ display: 'inline-block', marginTop: 16 }}>
+            回门口
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (!group) {
+    return (
+      <div className="stage landing">
+        <p className="subtitle">正在摆桌……</p>
+      </div>
+    );
+  }
+
+  const showingWheel = session && ['spinning', 'revealing', 'completed', 'failed'].includes(session.status);
+
+  return (
+    <div className="stage room">
+      <aside className="side">
+        <div>
+          <p className="kicker">Kai Fan</p>
+          <h1 className="side-brand">开饭</h1>
+          <p className="group-name">{group.name}</p>
+        </div>
+        <div className="invite">
+          <div style={{ fontSize: 12, color: 'var(--muted)' }}>邀请码</div>
+          <b>{group.code}</b>
+          <div>
+            <button className="btn btn-ghost" type="button" onClick={copyCode} style={{ marginTop: 8 }}>
+              {copied ? '已抄走' : '复制给团员'}
+            </button>
+          </div>
+        </div>
+        <div>
+          <div className="kicker">在座</div>
+          <div className="member-list">
+            {group.members.map((member) => (
+              <div className="member" key={member.userId}>
+                <span className="avatar" style={{ background: hue(member.name) }}>
+                  {member.name.slice(0, 1)}
+                </span>
+                <div style={{ flex: 1 }}>
+                  <div>{member.name}</div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                    {session
+                      ? `${session.votes.some((v) => v.userId === member.userId) ? '已加权' : '还没选'}${session.ready?.includes(member.userId) ? ' · 已随机' : ''}`
+                      : '在座'}
+                  </div>
+                </div>
+                {member.isLeader ? <span className="tag">团长</span> : null}
+                {isLeader && !member.isLeader ? (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-kick"
+                    title={`请离 ${member.name}`}
+                    onClick={() => kickMember(member)}
+                  >
+                    剔除
+                  </button>
+                ) : null}
+                <span className={`dot ${member.online ? 'on' : ''}`} />
+              </div>
+            ))}
+          </div>
+        </div>
+        <p className="rules">
+          投票给喜欢的菜 +{group.rules.VOTE_BOOST} 权重。近 {group.rules.DECAY_DAYS} 天抽中过的会掉权，满 {group.rules.DECAY_DAYS} 天恢复。同一天不重复。
+        </p>
+        <Link to="/" className="btn btn-ghost">
+          换一桌
+        </Link>
+      </aside>
+
+      <main className="main">
+        <div className="topbar">
+          <h2>{session ? '这轮点餐' : `${group.leaderName} 的菜单`}</h2>
+          <div className="actions">
+            {isLeader ? (
+              <button className="btn btn-ghost" type="button" onClick={() => setKitchen(true)}>
+                我的菜单库
+              </button>
+            ) : null}
+            {isLeader && !session ? (
+              <button className="btn btn-primary" type="button" onClick={() => runAction(() => roomActions.start(code, user.id))}>
+                发起点餐
+              </button>
+            ) : null}
+            {isLeader && session?.status === 'voting' ? (
+              <button className="btn btn-gold" type="button" onClick={() => runAction(() => roomActions.lock(code, user.id))}>
+                开始随机点餐
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        {session?.status === 'voting' ? (
+          <div className="session-banner">
+            <div>
+              <b>团长敲桌了，先给心仪的菜加权重。</b>
+              <div className="rules">每人一道，可改选。选完后等团长打开转盘。</div>
+            </div>
+            <div>{session.votes.length}/{group.members.length} 人已选</div>
+          </div>
+        ) : null}
+
+        {session?.status === 'spinning' ? (
+          <div className="session-banner">
+            <div>
+              <b>随机阶段：所有团员（含团长）都要点一下。</b>
+              <div className="rules">全员到齐后按权重出菜。有人没到，团长可以先开抽。</div>
+            </div>
+            <div>{session.ready.length}/{group.members.length} 人已随机</div>
+          </div>
+        ) : null}
+
+        {!isLeader && !session ? (
+          <p className="rules" style={{ marginBottom: 18 }}>
+            当前展示的是团长 {group.leaderName} 的个人菜单，团员可以投票但不能修改。
+          </p>
+        ) : null}
+
+        <p className="error">{error}</p>
+
+        <section className="board">
+          {group.menus.map((menu) => {
+            const row = weights.find((w) => w.menuId === menu.id);
+            const picked = myVote?.menuId === menu.id;
+            return (
+              <button
+                key={menu.id}
+                type="button"
+                className={`dish ${session?.status === 'voting' ? 'pickable' : ''} ${picked ? 'picked' : ''} ${row?.pickedToday ? 'blocked' : ''}`}
+                onClick={() => session?.status === 'voting' && runAction(() => roomActions.vote(code, user.id, menu.id))}
+              >
+                {row?.pickedToday ? <span className="today-badge">今日已中</span> : null}
+                <div className="dish-emoji">{menu.emoji}</div>
+                <h3>{menu.name}</h3>
+                <p>{menu.desc || menu.category}</p>
+                <div className="weight-bar">
+                  <span style={{ width: `${((row?.weight || 0) / maxWeight) * 100}%` }} />
+                </div>
+                <div className="meta">
+                  <span>权重 {row?.weight ?? 0}</span>
+                  <span>投票 +{row?.voteCount || 0} · 衰减 {Math.round((row?.recency ?? 1) * 100)}%</span>
+                </div>
+              </button>
+            );
+          })}
+        </section>
+
+        <section className="history">
+          <h3>近期开出的菜</h3>
+          {group.history.length === 0 ? (
+            <p className="rules">还没抽过。抽中过的菜会在这里留下油渍。</p>
+          ) : (
+            <div className="timeline">
+              {group.history.slice(0, 10).map((item) => (
+                <div className="stamp" key={item.id}>
+                  <div className="when">{formatWhen(item.at)}</div>
+                  <div style={{ fontSize: 22, margin: '6px 0' }}>{item.emoji}</div>
+                  <b>{item.name}</b>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </main>
+
+      {kitchen && isLeader ? <Kitchen group={group} user={user} onClose={() => setKitchen(false)} /> : null}
+
+      {showingWheel ? (
+        <div className="overlay">
+          <div className="wheel-card">
+            <p className="kicker">Lazy susan</p>
+            <h2 className="side-brand" style={{ fontSize: 40 }}>
+              {session.status === 'failed' ? '今天菜单见底了' : '转起来'}
+            </h2>
+            {session.status === 'spinning' ? (
+              <>
+                <p className="subtitle">全员点过「参与随机」后，按当前权重出菜。</p>
+                <div className="ready-pills">
+                  {group.members.map((member) => (
+                    <span
+                      className={`pill ${session.ready.includes(member.userId) ? 'yes' : ''}`}
+                      key={member.userId}
+                    >
+                      {member.name}
+                      {session.ready.includes(member.userId) ? ' ✓' : ' …'}
+                    </span>
+                  ))}
+                </div>
+                <Wheel group={group} spinning={false} />
+                <div className="actions" style={{ justifyContent: 'center' }}>
+                  <button
+                    className="btn btn-primary"
+                    type="button"
+                    disabled={myReady}
+                    onClick={() => runAction(() => roomActions.ready(code, user.id))}
+                  >
+                    {myReady ? '已参与，等其他人' : '参与随机点餐'}
+                  </button>
+                  {isLeader ? (
+                    <button className="btn btn-ghost" type="button" onClick={() => runAction(() => roomActions.forceDraw(code, user.id))}>
+                      不等了，先开抽
+                    </button>
+                  ) : null}
+                </div>
+              </>
+            ) : null}
+            {session.status === 'revealing' ? (
+              <>
+                <p className="subtitle">权重已锁死，转盘正在找今晚的那道菜。</p>
+                <Wheel group={group} spinning />
+              </>
+            ) : null}
+            {session.status === 'completed' && session.result?.winner ? (
+              <>
+                <Wheel group={group} spinning={false} />
+                <div className="result-hero">
+                  {session.result.winner.emoji} {session.result.winner.name}
+                </div>
+                <p className="subtitle">今晚就它了。这道菜今天不会再被抽中，随后几天权重也会偏低。</p>
+                {isLeader ? (
+                  <button className="btn btn-gold" type="button" onClick={() => runAction(() => roomActions.close(code, user.id))}>
+                    收桌，回到菜单墙
+                  </button>
+                ) : (
+                  <p className="rules">等团长收桌。</p>
+                )}
+              </>
+            ) : null}
+            {session.status === 'failed' ? (
+              <>
+                <p className="subtitle">同一天不会抽中两次。请团长补充菜单，或明天再来。</p>
+                {isLeader ? (
+                  <button className="btn btn-gold" type="button" onClick={() => runAction(() => roomActions.close(code, user.id))}>
+                    知道了
+                  </button>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      <Toasts items={toasts} />
+    </div>
+  );
+}
+

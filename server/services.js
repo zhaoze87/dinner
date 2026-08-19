@@ -1,0 +1,439 @@
+import { v4 as uuid } from 'uuid';
+import { db } from './store.js';
+import { makeInviteCode, createStarterMenus } from './seed.js';
+import {
+  leaderMenus,
+  seedLeaderMenus,
+  parseMenuBody,
+  applyMenuPatch,
+} from './menus.js';
+import { computeWeights, pickWeighted, localDate, WEIGHT_RULES } from './engine.js';
+
+const PRESENCE_TTL = 30000;
+const REVEAL_MS = 5200;
+
+export async function findGroup(code) {
+  const key = String(code || '').trim().toUpperCase();
+  const data = await db.read();
+  return data.groups.find((g) => g.code === key) || null;
+}
+
+export async function findUser(id) {
+  const data = await db.read();
+  return data.users.find((u) => u.id === id) || null;
+}
+
+export function requireLeader(group, userId) {
+  return group && group.leaderId === userId;
+}
+
+export function memberOf(group, userId) {
+  return group?.members.some((m) => m.userId === userId);
+}
+
+export function publicUser(user) {
+  return { id: user.id, name: user.name, createdAt: user.createdAt };
+}
+
+export function getGroupMenus(data, group) {
+  return leaderMenus(data, group.leaderId);
+}
+
+function ensurePresence(group) {
+  if (!group.presence) group.presence = {};
+}
+
+function pushNotify(group, payload) {
+  if (!group.notifies) group.notifies = [];
+  const item = { id: uuid(), at: Date.now(), ...payload };
+  group.notifies.push(item);
+  if (group.notifies.length > 30) group.notifies = group.notifies.slice(-30);
+  group.updatedAt = Date.now();
+  return item;
+}
+
+function touchPresence(group, userId) {
+  ensurePresence(group);
+  group.presence[userId] = Date.now();
+  group.updatedAt = Date.now();
+}
+
+function isOnline(group, userId) {
+  ensurePresence(group);
+  return Date.now() - (group.presence[userId] || 0) < PRESENCE_TTL;
+}
+
+export function resolveSessionTiming(group) {
+  const session = group.session;
+  if (!session || session.status !== 'revealing') return false;
+  const revealAt = session.result?.revealAt;
+  if (!revealAt || Date.now() < revealAt) return false;
+  session.status = 'completed';
+  const winner = session.result?.winner;
+  pushNotify(group, {
+    type: 'result',
+    title: '今晚就它了',
+    message: winner ? `${winner.emoji} ${winner.name}` : '出菜了',
+  });
+  group.updatedAt = Date.now();
+  return true;
+}
+
+export async function snapshot(group) {
+  await db.write((data) => {
+    const g = data.groups.find((x) => x.id === group.id);
+    if (g) resolveSessionTiming(g);
+  });
+  const fresh = await findGroup(group.code);
+  const data = await db.read();
+  const users = data.users;
+  const session = fresh.session;
+  const votes = session?.votes || [];
+  const menus = getGroupMenus(data, fresh);
+  const leader = users.find((u) => u.id === fresh.leaderId);
+  const weights = computeWeights(menus, votes, fresh.history);
+  return {
+    id: fresh.id,
+    code: fresh.code,
+    name: fresh.name,
+    leaderId: fresh.leaderId,
+    leaderName: leader?.name || '团长',
+    createdAt: fresh.createdAt,
+    updatedAt: fresh.updatedAt || fresh.createdAt,
+    members: fresh.members.map((m) => {
+      const user = users.find((u) => u.id === m.userId);
+      return {
+        userId: m.userId,
+        name: user?.name || '未知',
+        joinedAt: m.joinedAt,
+        isLeader: m.userId === fresh.leaderId,
+        online: isOnline(fresh, m.userId),
+      };
+    }),
+    menus,
+    menuOwnerId: fresh.leaderId,
+    history: [...fresh.history].sort((a, b) => b.at - a.at),
+    session: session
+      ? {
+          id: session.id,
+          status: session.status,
+          startedAt: session.startedAt,
+          startedBy: session.startedBy,
+          votes,
+          ready: session.ready,
+          result: session.result,
+          weights,
+        }
+      : null,
+    weights: session ? undefined : weights,
+    rules: WEIGHT_RULES,
+    today: localDate(),
+  };
+}
+
+export async function groupsLedBy(leaderId) {
+  const data = await db.read();
+  return data.groups.filter((g) => g.leaderId === leaderId);
+}
+
+function purgeMemberFromSession(group, memberId) {
+  if (!group.session) return;
+  group.session.votes = group.session.votes.filter((v) => v.userId !== memberId);
+  group.session.ready = group.session.ready.filter((id) => id !== memberId);
+}
+
+export async function kickMember(group, memberId) {
+  if (memberId === group.leaderId) return { error: '不能剔除团长' };
+  if (!memberOf(group, memberId)) return { error: '这个人不在本桌' };
+  const target = await findUser(memberId);
+  await db.write((data) => {
+    const g = data.groups.find((x) => x.id === group.id);
+    g.members = g.members.filter((m) => m.userId !== memberId);
+    purgeMemberFromSession(g, memberId);
+    pushNotify(g, {
+      type: 'member-kick',
+      title: '有人被请离本桌',
+      message: target ? `${target.name} 被团长请走了` : '一名团员被请走了',
+    });
+    g.updatedAt = Date.now();
+  });
+  return { ok: true, target };
+}
+
+export async function createUser(name) {
+  const user = { id: uuid(), name, createdAt: Date.now(), menus: [] };
+  await db.write((data) => data.users.push(user));
+  return user;
+}
+
+export async function createGroup(userId, name) {
+  const user = await findUser(userId);
+  if (!user) return { error: '请先报上名号' };
+  let code = makeInviteCode();
+  while (await findGroup(code)) code = makeInviteCode();
+  const group = {
+    id: uuid(),
+    code,
+    name,
+    leaderId: user.id,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    members: [{ userId: user.id, joinedAt: Date.now() }],
+    history: [],
+    session: null,
+    notifies: [],
+    presence: {},
+  };
+  await db.write((data) => {
+    const leader = data.users.find((u) => u.id === user.id);
+    seedLeaderMenus(leader);
+    data.groups.push(group);
+  });
+  return { group: await findGroup(code) };
+}
+
+export async function joinGroup(userId, code) {
+  const user = await findUser(userId);
+  const group = await findGroup(code);
+  if (!user) return { error: '请先报上名号' };
+  if (!group) return { error: '邀请码不对，这桌不存在' };
+  let joined = false;
+  await db.write((data) => {
+    const g = data.groups.find((x) => x.code === group.code);
+    if (!memberOf(g, user.id)) {
+      g.members.push({ userId: user.id, joinedAt: Date.now() });
+      joined = true;
+      pushNotify(g, {
+        type: 'member-join',
+        title: '有人入座了',
+        message: `${user.name} 拉开椅子坐下`,
+      });
+    }
+    touchPresence(g, user.id);
+  });
+  return { group: await findGroup(code), joined };
+}
+
+export async function syncGroup(code, userId, since = 0) {
+  const group = await findGroup(code);
+  if (!group) return { error: '这桌已经散了' };
+  if (!memberOf(group, userId)) return { error: '你不在本桌', kicked: true };
+  await db.write((data) => {
+    const g = data.groups.find((x) => x.code === group.code);
+    resolveSessionTiming(g);
+    touchPresence(g, userId);
+  });
+  const fresh = await findGroup(code);
+  if (!memberOf(fresh, userId)) {
+    return { kicked: true, message: '你已被移出本桌' };
+  }
+  const notifies = (fresh.notifies || []).filter((n) => n.at > since);
+  return { group: await snapshot(fresh), notifies };
+}
+
+export async function startSession(code, userId) {
+  const group = await findGroup(code);
+  const user = await findUser(userId);
+  if (!group || !requireLeader(group, userId)) return { error: '只有团长能发起点餐' };
+  if (group.session && !['completed', 'failed'].includes(group.session.status)) {
+    return { error: '这轮还没结束' };
+  }
+  const data = await db.read();
+  if (getGroupMenus(data, group).length < 2) return { error: '至少先录入两道菜' };
+  await db.write((d) => {
+    const g = d.groups.find((x) => x.code === code);
+    g.session = {
+      id: uuid(),
+      status: 'voting',
+      startedAt: Date.now(),
+      startedBy: userId,
+      votes: [],
+      ready: [],
+      result: null,
+    };
+    pushNotify(g, {
+      type: 'session-start',
+      title: '开饭了',
+      message: `${user.name} 敲了敲桌子：今晚吃啥，大家先点个心仪的。`,
+    });
+  });
+  return { group: await snapshot(await findGroup(code)) };
+}
+
+export async function voteSession(code, userId, menuId) {
+  const group = await findGroup(code);
+  const user = await findUser(userId);
+  if (!group?.session || group.session.status !== 'voting') return { error: '现在还不能投票' };
+  const data = await db.read();
+  const menu = getGroupMenus(data, group).find((m) => m.id === menuId);
+  if (!menu) return { error: '这道菜不在菜单上' };
+  await db.write((d) => {
+    const g = d.groups.find((x) => x.code === code);
+    g.session.votes = g.session.votes.filter((v) => v.userId !== userId);
+    g.session.votes.push({ userId, menuId, at: Date.now() });
+    pushNotify(g, {
+      type: 'vote',
+      title: '有人加了权重',
+      message: `${user.name} 把票投给了 ${menu.emoji} ${menu.name}`,
+    });
+  });
+  return { group: await snapshot(await findGroup(code)) };
+}
+
+export async function lockSession(code, userId) {
+  const group = await findGroup(code);
+  if (!group || !requireLeader(group, userId) || group.session?.status !== 'voting') {
+    return { error: '现在不能开始随机' };
+  }
+  await db.write((d) => {
+    const g = d.groups.find((x) => x.code === code);
+    g.session.status = 'spinning';
+    if (!g.session.ready.includes(userId)) g.session.ready.push(userId);
+    pushNotify(g, {
+      type: 'spin-open',
+      title: '转盘打开了',
+      message: '每人点一下「参与随机」，全员到齐后按权重开抽。',
+    });
+  });
+  return { group: await snapshot(await findGroup(code)) };
+}
+
+async function drawNow(code, forced) {
+  const group = await findGroup(code);
+  const votes = group.session.votes;
+  const data = await db.read();
+  const menus = getGroupMenus(data, group);
+  const weights = computeWeights(menus, votes, group.history);
+  const picked = pickWeighted(weights);
+  const winner = menus.find((m) => m.id === picked.winnerId) || null;
+
+  if (!winner) {
+    await db.write((d) => {
+      const g = d.groups.find((x) => x.code === code);
+      g.session.status = 'failed';
+      g.session.result = {
+        reason: 'no-eligible',
+        forced,
+        weights,
+        at: Date.now(),
+        duration: 0,
+      };
+      pushNotify(g, {
+        type: 'failed',
+        title: '今天菜单都吃过了',
+        message: '同一天不会抽中同一道菜。换几道新菜，或明天再来。',
+      });
+    });
+    return;
+  }
+
+  const record = {
+    id: uuid(),
+    sessionId: group.session.id,
+    menuId: winner.id,
+    name: winner.name,
+    emoji: winner.emoji,
+    at: Date.now(),
+    date: localDate(),
+    forced,
+  };
+
+  await db.write((d) => {
+    const g = d.groups.find((x) => x.code === code);
+    g.session.status = 'revealing';
+    g.session.result = {
+      winnerId: winner.id,
+      winner,
+      weights,
+      forced,
+      at: record.at,
+      duration: REVEAL_MS,
+      revealAt: Date.now() + REVEAL_MS,
+    };
+    g.history.push(record);
+    pushNotify(g, {
+      type: 'drawing',
+      title: '转盘转起来了',
+      message: forced ? '团长不等了，按现有权重开抽。' : '全员到齐，按权重随机出菜。',
+    });
+  });
+}
+
+export async function readySession(code, userId) {
+  const group = await findGroup(code);
+  const user = await findUser(userId);
+  if (!group?.session || group.session.status !== 'spinning') return { error: '还没轮到随机' };
+  await db.write((d) => {
+    const g = d.groups.find((x) => x.code === code);
+    if (!g.session.ready.includes(userId)) g.session.ready.push(userId);
+    pushNotify(g, {
+      type: 'ready',
+      title: '有人按下转盘',
+      message: `${user.name} 已参与随机`,
+    });
+  });
+  const fresh = await findGroup(code);
+  const memberIds = fresh.members.map((m) => m.userId);
+  const allReady = memberIds.every((id) => fresh.session.ready.includes(id));
+  if (allReady) await drawNow(code, false);
+  return { group: await snapshot(await findGroup(code)) };
+}
+
+export async function forceDrawSession(code, userId) {
+  const group = await findGroup(code);
+  if (!group || !requireLeader(group, userId) || group.session?.status !== 'spinning') {
+    return { error: '现在不能强抽' };
+  }
+  await drawNow(code, true);
+  return { group: await snapshot(await findGroup(code)) };
+}
+
+export async function closeSession(code, userId) {
+  const group = await findGroup(code);
+  if (!group || !requireLeader(group, userId)) return { error: '只有团长能收桌' };
+  if (!group.session || !['completed', 'failed'].includes(group.session.status)) {
+    return { error: '这轮还没结束' };
+  }
+  await db.write((d) => {
+    const g = d.groups.find((x) => x.code === code);
+    g.session = null;
+    g.updatedAt = Date.now();
+  });
+  return { group: await snapshot(await findGroup(code)) };
+}
+
+export async function addMenu(userId, body) {
+  const user = await findUser(userId);
+  const actor = await findUser(body?.userId);
+  if (!user || actor?.id !== user.id) return { error: '只能管理自己的菜单' };
+  const parsed = parseMenuBody(body);
+  if (parsed.error) return { error: parsed.error };
+  const menu = { id: uuid(), ...parsed.menu, createdAt: Date.now() };
+  await db.write((data) => leaderMenus(data, user.id).push(menu));
+  const groups = await groupsLedBy(user.id);
+  return { menu, groups };
+}
+
+export async function updateMenu(userId, menuId, body) {
+  const user = await findUser(userId);
+  const actor = await findUser(body?.userId);
+  if (!user || actor?.id !== user.id) return { error: '只能管理自己的菜单' };
+  const data = await db.read();
+  const menu = leaderMenus(data, user.id).find((m) => m.id === menuId);
+  if (!menu) return { error: '这道菜不在菜单上' };
+  await db.write(() => applyMenuPatch(menu, body));
+  return { menu };
+}
+
+export async function deleteMenu(userId, menuId, actorId) {
+  const user = await findUser(userId);
+  const actor = await findUser(actorId);
+  if (!user || actor?.id !== user.id) return { error: '只能管理自己的菜单' };
+  await db.write((data) => {
+    const owner = data.users.find((u) => u.id === user.id);
+    owner.menus = leaderMenus(data, user.id).filter((m) => m.id !== menuId);
+  });
+  return { ok: true };
+}
+
+export { leaderMenus, parseMenuBody, seedLeaderMenus, createStarterMenus };

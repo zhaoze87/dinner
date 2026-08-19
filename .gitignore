@@ -1,0 +1,9 @@
+node_modules
+dist
+data/db.json
+.DS_Store
+*.log
+.vscode
+.idea
+.vercel
+.svn

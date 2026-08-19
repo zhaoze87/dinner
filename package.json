@@ -1,0 +1,29 @@
+{
+  "name": "kaifan",
+  "version": "1.0.0",
+  "private": true,
+  "description": "多人点餐 · 权重转盘 · 今晚吃啥",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n server,client -c yellow,cyan \"npm run server\" \"npm run client\"",
+    "server": "node server/index.js",
+    "client": "vite",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "vercel-build": "vite build"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.34.3",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "vite": "^6.0.3"
+  }
+}
