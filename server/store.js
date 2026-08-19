@@ -17,21 +17,20 @@ function hasBlobToken() {
 }
 
 async function blobLoad() {
-  const { head } = await import('@vercel/blob');
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  const { get } = await import('@vercel/blob');
 
   try {
-    const info = await head(BLOB_PATHNAME);
-    const res = await fetch(`${info.url}?t=${Date.now()}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Cache-Control': 'no-store, no-cache',
-        Pragma: 'no-cache',
-      },
-      cache: 'no-store',
-    });
-    if (!res.ok) return null;
-    return res.json();
+    const result = await get(BLOB_PATHNAME, { access: 'private', useCache: false });
+    if (!result || result.statusCode === 404) return null;
+    // Collect stream into text
+    const chunks = [];
+    const reader = result.stream.getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (value) chunks.push(Buffer.from(value));
+      if (done) break;
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
     return null;
   }
