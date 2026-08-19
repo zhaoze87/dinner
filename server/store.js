@@ -18,11 +18,13 @@ function hasBlobToken() {
 
 async function blobLoad() {
   const { head } = await import('@vercel/blob');
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
 
   try {
     const info = await head(BLOB_PATHNAME);
-    // downloadUrl for private blobs is a pre-signed URL, fetch it directly
-    const res = await fetch(info.downloadUrl);
+    const res = await fetch(info.url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
     if (!res.ok) return null;
     return res.json();
   } catch {
