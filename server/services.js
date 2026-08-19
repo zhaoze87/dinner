@@ -161,6 +161,9 @@ export async function kickMember(group, memberId) {
 }
 
 export async function createUser(name) {
+  const data = await db.read();
+  const existing = data.users.find(u => u.name === name);
+  if (existing) return existing;
   const user = { id: uuid(), name, createdAt: Date.now(), menus: [] };
   await db.write((data) => data.users.push(user));
   return user;
