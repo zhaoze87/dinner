@@ -162,7 +162,7 @@ app.delete('/api/users/:id/menus/:menuId', asyncRoute(async (req, res) => {
 
 app.use((err, _req, res, _next) => {
   console.error(err);
-  res.status(500).json({ error: '服务器开小差了' });
+  res.status(500).json({ error: '服务器开小差了', detail: String(err?.message || err) });
 });
 
 export default app;
