@@ -39,12 +39,27 @@ function fail(res, result, status = 400) {
 }
 
 app.get('/api/debug/blob', asyncRoute(async (_req, res) => {
-  const { head } = await import('@vercel/blob');
+  const { head, get } = await import('@vercel/blob');
   try {
     const info = await head('kaifan-db.json');
-    const r = await fetch(info.downloadUrl);
-    const text = await r.text();
-    res.json({ info, status: r.status, preview: text.slice(0, 200) });
+    // try sdk get
+    let sdkResult = null;
+    let sdkError = null;
+    try {
+      const r = await get('kaifan-db.json', { access: 'private' });
+      if (r && r.stream) {
+        const reader = r.stream.getReader();
+        const chunks = [];
+        let d = false;
+        while (!d) { const {value,done} = await reader.read(); if(value) chunks.push(value); d=done; }
+        sdkResult = Buffer.concat(chunks.map(c=>Buffer.from(c))).toString('utf8').slice(0,200);
+      }
+    } catch(e) { sdkError = String(e); }
+    // try bearer token
+    const token = process.env.BLOB_READ_WRITE_TOKEN;
+    const r2 = await fetch(info.url, { headers: { Authorization: `Bearer ${token}` } });
+    const t2 = await r2.text();
+    res.json({ info: { size: info.size, uploadedAt: info.uploadedAt, url: info.url.slice(0,60) }, bearerStatus: r2.status, bearerPreview: t2.slice(0,100), sdkResult, sdkError });
   } catch (e) {
     res.json({ error: String(e) });
   }
