@@ -1,22 +1,52 @@
-import { useMemo, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { api, loadUser, saveUser } from '../lib/api.js';
+import { useEffect, useMemo, useState } from 'react';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { api, clearRoom, loadRoom, loadUser, saveRoom, saveUser } from '../lib/api.js';
 
 export default function Landing() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const inviteFromLink = (searchParams.get('join') || '').trim().toUpperCase();
   const existing = useMemo(() => loadUser(), []);
+  const savedRoom = useMemo(() => loadRoom(), []);
   const [name, setName] = useState(existing?.name || '');
-  const [groupName, setGroupName] = useState('今晚的饭局');
-  const [code, setCode] = useState('');
+  const [groupName, setGroupName] = useState(savedRoom?.name || '今晚的饭局');
+  const [code, setCode] = useState(inviteFromLink);
   const [error, setError] = useState('');
   const [notice] = useState(() => location.state?.notice || '');
   const [busy, setBusy] = useState(false);
+  const [resuming, setResuming] = useState(false);
+
+  // 重启/刷新后自动回到上次的桌
+  useEffect(() => {
+    if (inviteFromLink) return undefined;
+    const user = loadUser();
+    const room = loadRoom();
+    if (!user?.id || !room?.code) return undefined;
+
+    let cancelled = false;
+    setResuming(true);
+    api('/api/groups/join', { method: 'POST', body: { userId: user.id, code: room.code } })
+      .then(({ group }) => {
+        if (cancelled) return;
+        saveRoom(group);
+        navigate(`/g/${group.code}`, { replace: true });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          clearRoom();
+          setResuming(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [inviteFromLink, navigate]);
 
   async function ensureUser() {
     const trimmed = name.trim();
     if (!trimmed) throw new Error('先报上今晚怎么称呼你');
-    if (existing?.id && existing.name === trimmed) return existing;
     const { user } = await api('/api/users', { method: 'POST', body: { name: trimmed } });
     return saveUser(user);
   }
@@ -31,6 +61,7 @@ export default function Landing() {
         method: 'POST',
         body: { userId: user.id, name: groupName },
       });
+      saveRoom(group);
       navigate(`/g/${group.code}`);
     } catch (err) {
       setError(err.message);
@@ -44,17 +75,86 @@ export default function Landing() {
     setBusy(true);
     setError('');
     try {
+      const invite = (code || inviteFromLink).trim().toUpperCase();
+      if (!invite) throw new Error('先填邀请码，或打开分享链接');
       const user = await ensureUser();
       const { group } = await api('/api/groups/join', {
         method: 'POST',
-        body: { userId: user.id, code },
+        body: { userId: user.id, code: invite },
       });
+      saveRoom(group);
       navigate(`/g/${group.code}`);
     } catch (err) {
       setError(err.message);
     } finally {
       setBusy(false);
     }
+  }
+
+  async function resumeRoom() {
+    const room = loadRoom();
+    if (!room?.code) return;
+    setBusy(true);
+    setError('');
+    try {
+      const user = await ensureUser();
+      const { group } = await api('/api/groups/join', {
+        method: 'POST',
+        body: { userId: user.id, code: room.code },
+      });
+      saveRoom(group);
+      navigate(`/g/${group.code}`);
+    } catch (err) {
+      clearRoom();
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (resuming) {
+    return (
+      <div className="stage landing">
+        <p className="subtitle">正在回到你的桌……</p>
+      </div>
+    );
+  }
+
+  // 带 ?join=邀请码 进来：只填名字入座
+  if (inviteFromLink) {
+    return (
+      <div className="stage landing">
+        <div className="lantern" style={{ top: 36, left: '12%' }} />
+        <div className="lantern" style={{ top: 64, right: '14%', animationDelay: '-1.4s' }} />
+        <div className="landing-card">
+          <p className="kicker">Invite seat</p>
+          <h1 className="brand">入座</h1>
+          <p className="subtitle">有人请你来开饭。报上称呼即可入座，不用再填邀请码。</p>
+          <div className="invite" style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 12, color: 'var(--muted)' }}>本桌邀请码</div>
+            <b>{inviteFromLink}</b>
+          </div>
+          <p className="error">{error}</p>
+          {notice ? <p className="hint">{notice}</p> : null}
+          <form onSubmit={joinGroup}>
+            <div className="field">
+              <label htmlFor="name">你的称呼</label>
+              <input
+                id="name"
+                value={name}
+                maxLength={12}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="例如：老张"
+                autoFocus
+              />
+            </div>
+            <button className="btn btn-primary" type="submit" disabled={busy} style={{ width: '100%' }}>
+              {busy ? '入座中…' : '入座开饭'}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -73,6 +173,22 @@ export default function Landing() {
         </div>
         <p className="error">{error}</p>
         {notice ? <p className="hint">{notice}</p> : null}
+        {savedRoom?.code ? (
+          <div style={{ marginBottom: 18 }}>
+            <button
+              className="btn btn-gold"
+              type="button"
+              disabled={busy}
+              onClick={resumeRoom}
+              style={{ width: '100%' }}
+            >
+              回到我的桌 · {savedRoom.code}
+            </button>
+            <p className="hint" style={{ marginTop: 8 }}>
+              分享码不变，重启后也能直接回到这桌。
+            </p>
+          </div>
+        ) : null}
         <form onSubmit={createGroup}>
           <div className="field">
             <label htmlFor="name">你的称呼</label>
@@ -85,7 +201,7 @@ export default function Landing() {
             />
           </div>
           <div className="field">
-            <label htmlFor="gname">新开一桌，饭局名</label>
+            <label htmlFor="gname">饭局名</label>
             <input
               id="gname"
               value={groupName}
@@ -94,7 +210,7 @@ export default function Landing() {
             />
           </div>
           <button className="btn btn-primary" type="submit" disabled={busy} style={{ width: '100%' }}>
-            我来当团长，开一桌
+            {savedRoom?.code ? '进入我的桌（沿用原邀请码）' : '我来当团长，开一桌'}
           </button>
         </form>
         <form onSubmit={joinGroup} style={{ marginTop: 22 }}>

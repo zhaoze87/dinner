@@ -79,7 +79,18 @@ export function resolveSessionTiming(group) {
   return true;
 }
 
-export async function snapshot(group) {
+function publicWeightRows(menus, history) {
+  // 对外不带投票加成，避免从权重变化反推个人选择
+  return computeWeights(menus, [], history);
+}
+
+function redactResult(result, menus, history) {
+  if (!result) return null;
+  const { weights: _hidden, ...rest } = result;
+  return { ...rest, weights: publicWeightRows(menus, history) };
+}
+
+export async function snapshot(group, viewerId = null) {
   await db.write((data) => {
     const g = data.groups.find((x) => x.id === group.id);
     if (g) resolveSessionTiming(g);
@@ -91,7 +102,8 @@ export async function snapshot(group) {
   const votes = session?.votes || [];
   const menus = getGroupMenus(data, fresh);
   const leader = users.find((u) => u.id === fresh.leaderId);
-  const weights = computeWeights(menus, votes, fresh.history);
+  const displayWeights = publicWeightRows(menus, fresh.history);
+  const myVotes = viewerId ? votes.filter((v) => v.userId === viewerId) : [];
   return {
     id: fresh.id,
     code: fresh.code,
@@ -119,13 +131,16 @@ export async function snapshot(group) {
           status: session.status,
           startedAt: session.startedAt,
           startedBy: session.startedBy,
-          votes,
+          // 只回自己的选票明细；他人仅知「谁已选」
+          votes: myVotes,
+          votedUserIds: votes.map((v) => v.userId),
+          voteCount: votes.length,
           ready: session.ready,
-          result: session.result,
-          weights,
+          result: redactResult(session.result, menus, fresh.history),
+          weights: displayWeights,
         }
       : null,
-    weights: session ? undefined : weights,
+    weights: session ? undefined : displayWeights,
     rules: WEIGHT_RULES,
     today: localDate(),
   };
@@ -162,22 +177,52 @@ export async function kickMember(group, memberId) {
 
 export async function createUser(name) {
   const data = await db.read();
-  const existing = data.users.find(u => u.name === name);
-  if (existing) return existing;
+  const matches = data.users.filter((u) => u.name === name);
+  if (matches.length) {
+    // 同名：优先菜单更丰富的；一样多时优先含「餐厅」分类（真实录入）的
+    return matches.reduce((best, cur) => {
+      const curN = cur.menus?.length || 0;
+      const bestN = best.menus?.length || 0;
+      if (curN !== bestN) return curN > bestN ? cur : best;
+      const curReal = (cur.menus || []).some((m) => m.category === '餐厅');
+      const bestReal = (best.menus || []).some((m) => m.category === '餐厅');
+      if (curReal !== bestReal) return curReal ? cur : best;
+      return (cur.createdAt || 0) >= (best.createdAt || 0) ? cur : best;
+    });
+  }
   const user = { id: uuid(), name, createdAt: Date.now(), menus: [] };
-  await db.write((data) => data.users.push(user));
+  await db.write((d) => d.users.push(user));
   return user;
 }
 
 export async function createGroup(userId, name) {
   const user = await findUser(userId);
   if (!user) return { error: '请先报上名号' };
+
+  const led = await groupsLedBy(user.id);
+  if (led.length) {
+    const existing = led.sort(
+      (a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt),
+    )[0];
+    const trimmed = String(name || '').trim().slice(0, 20);
+    if (trimmed && trimmed !== existing.name) {
+      await db.write((data) => {
+        const g = data.groups.find((x) => x.id === existing.id);
+        if (g) {
+          g.name = trimmed;
+          g.updatedAt = Date.now();
+        }
+      });
+    }
+    return { group: await findGroup(existing.code), reused: true };
+  }
+
   let code = makeInviteCode();
   while (await findGroup(code)) code = makeInviteCode();
   const group = {
     id: uuid(),
     code,
-    name,
+    name: String(name || '').trim().slice(0, 20) || '今晚的饭局',
     leaderId: user.id,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -192,7 +237,7 @@ export async function createGroup(userId, name) {
     seedLeaderMenus(leader);
     data.groups.push(group);
   });
-  return { group: await findGroup(code) };
+  return { group: await findGroup(code), reused: false };
 }
 
 export async function joinGroup(userId, code) {
@@ -231,7 +276,7 @@ export async function syncGroup(code, userId, since = 0) {
     return { kicked: true, message: '你已被移出本桌' };
   }
   const notifies = (fresh.notifies || []).filter((n) => n.at > since);
-  return { group: await snapshot(fresh), notifies };
+  return { group: await snapshot(fresh, userId), notifies };
 }
 
 export async function startSession(code, userId) {
@@ -260,7 +305,7 @@ export async function startSession(code, userId) {
       message: `${user.name} 敲了敲桌子：今晚吃啥，大家先点个心仪的。`,
     });
   });
-  return { group: await snapshot(await findGroup(code)) };
+  return { group: await snapshot(await findGroup(code), userId) };
 }
 
 export async function voteSession(code, userId, menuId) {
@@ -276,11 +321,11 @@ export async function voteSession(code, userId, menuId) {
     g.session.votes.push({ userId, menuId, at: Date.now() });
     pushNotify(g, {
       type: 'vote',
-      title: '有人加了权重',
-      message: `${user.name} 把票投给了 ${menu.emoji} ${menu.name}`,
+      title: '有人已选中',
+      message: `${user.name} 已选中`,
     });
   });
-  return { group: await snapshot(await findGroup(code)) };
+  return { group: await snapshot(await findGroup(code), userId) };
 }
 
 export async function lockSession(code, userId) {
@@ -298,7 +343,7 @@ export async function lockSession(code, userId) {
       message: '每人点一下「参与随机」，全员到齐后按权重开抽。',
     });
   });
-  return { group: await snapshot(await findGroup(code)) };
+  return { group: await snapshot(await findGroup(code), userId) };
 }
 
 async function drawNow(code, forced) {
@@ -379,7 +424,7 @@ export async function readySession(code, userId) {
   const memberIds = fresh.members.map((m) => m.userId);
   const allReady = memberIds.every((id) => fresh.session.ready.includes(id));
   if (allReady) await drawNow(code, false);
-  return { group: await snapshot(await findGroup(code)) };
+  return { group: await snapshot(await findGroup(code), userId) };
 }
 
 export async function forceDrawSession(code, userId) {
@@ -388,7 +433,7 @@ export async function forceDrawSession(code, userId) {
     return { error: '现在不能强抽' };
   }
   await drawNow(code, true);
-  return { group: await snapshot(await findGroup(code)) };
+  return { group: await snapshot(await findGroup(code), userId) };
 }
 
 export async function closeSession(code, userId) {
@@ -402,7 +447,7 @@ export async function closeSession(code, userId) {
     g.session = null;
     g.updatedAt = Date.now();
   });
-  return { group: await snapshot(await findGroup(code)) };
+  return { group: await snapshot(await findGroup(code), userId) };
 }
 
 export async function addMenu(userId, body) {

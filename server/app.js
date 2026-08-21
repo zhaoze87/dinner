@@ -60,19 +60,19 @@ app.post('/api/groups', asyncRoute(async (req, res) => {
   const name = String(req.body?.name || '').trim().slice(0, 20) || '今晚的饭局';
   const result = await createGroup(req.body?.userId, name);
   if (fail(res, result)) return;
-  res.json({ group: await snapshot(result.group) });
+  res.json({ group: await snapshot(result.group, req.body?.userId) });
 }));
 
 app.post('/api/groups/join', asyncRoute(async (req, res) => {
   const result = await joinGroup(req.body?.userId, req.body?.code);
   if (fail(res, result, result.error === '邀请码不对，这桌不存在' ? 404 : 400)) return;
-  res.json({ group: await snapshot(result.group) });
+  res.json({ group: await snapshot(result.group, req.body?.userId) });
 }));
 
 app.get('/api/groups/:code', asyncRoute(async (req, res) => {
   const group = await findGroup(req.params.code);
   if (!group) return res.status(404).json({ error: '这桌已经散了' });
-  res.json({ group: await snapshot(group) });
+  res.json({ group: await snapshot(group, req.query.userId) });
 }));
 
 app.get('/api/groups/:code/sync', asyncRoute(async (req, res) => {
@@ -87,13 +87,14 @@ app.get('/api/groups/:code/sync', asyncRoute(async (req, res) => {
 
 app.delete('/api/groups/:code/members/:memberId', asyncRoute(async (req, res) => {
   const group = await findGroup(req.params.code);
-  const actor = await findUser(req.body?.userId || req.query.userId);
+  const actorId = req.body?.userId || req.query.userId;
+  const actor = await findUser(actorId);
   if (!group || group.leaderId !== actor?.id) {
     return res.status(403).json({ error: '只有团长能剔除团员' });
   }
   const result = await kickMember(group, req.params.memberId);
   if (fail(res, result)) return;
-  res.json({ ok: true, group: await snapshot(await findGroup(group.code)) });
+  res.json({ ok: true, group: await snapshot(await findGroup(group.code), actorId) });
 }));
 
 app.post('/api/groups/:code/session/start', asyncRoute(async (req, res) => {
