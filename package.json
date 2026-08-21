@@ -2,6 +2,7 @@
   "name": "kaifan",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "description": "多人点餐 · 权重转盘 · 今晚吃啥",
   "type": "module",
   "scripts": {
