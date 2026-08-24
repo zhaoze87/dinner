@@ -8,6 +8,15 @@ import {
   applyMenuPatch,
 } from './menus.js';
 import { computeWeights, pickWeighted, localDate, WEIGHT_RULES } from './engine.js';
+import {
+  parseFeishuWebhook,
+  parseShareOrigin,
+  buildInviteUrl,
+  maskWebhook,
+  sendFeishuOpenTable,
+  sendFeishuResult,
+  sendFeishuFailed,
+} from './feishu.js';
 
 const PRESENCE_TTL = 30000;
 const REVEAL_MS = 5200;
@@ -143,6 +152,8 @@ export async function snapshot(group, viewerId = null) {
     weights: session ? undefined : displayWeights,
     rules: WEIGHT_RULES,
     today: localDate(),
+    hasFeishuWebhook: Boolean(fresh.feishuWebhook),
+    feishuWebhookMasked: viewerId === fresh.leaderId ? maskWebhook(fresh.feishuWebhook) : '',
   };
 }
 
@@ -231,6 +242,8 @@ export async function createGroup(userId, name) {
     session: null,
     notifies: [],
     presence: {},
+    feishuWebhook: '',
+    shareOrigin: '',
   };
   await db.write((data) => {
     const leader = data.users.find((u) => u.id === user.id);
@@ -266,11 +279,13 @@ export async function syncGroup(code, userId, since = 0) {
   const group = await findGroup(code);
   if (!group) return { error: '这桌已经散了' };
   if (!memberOf(group, userId)) return { error: '你不在本桌', kicked: true };
+  let completedNow = false;
   await db.write((data) => {
     const g = data.groups.find((x) => x.code === group.code);
-    resolveSessionTiming(g);
+    completedNow = resolveSessionTiming(g);
     touchPresence(g, userId);
   });
+  if (completedNow) await maybeNotifyFeishuOutcome(code);
   const fresh = await findGroup(code);
   if (!memberOf(fresh, userId)) {
     return { kicked: true, message: '你已被移出本桌' };
@@ -279,7 +294,121 @@ export async function syncGroup(code, userId, since = 0) {
   return { group: await snapshot(fresh, userId), notifies };
 }
 
-export async function startSession(code, userId) {
+async function rememberShareOrigin(code, origin) {
+  const shareOrigin = parseShareOrigin(origin);
+  if (!shareOrigin) return '';
+  await db.write((d) => {
+    const g = d.groups.find((x) => x.code === String(code || '').toUpperCase());
+    if (g) g.shareOrigin = shareOrigin;
+  });
+  return shareOrigin;
+}
+
+async function notifyGroupOpened(group, origin) {
+  if (!group?.feishuWebhook) return { skipped: true };
+  const shareOrigin = parseShareOrigin(origin) || group.shareOrigin || '';
+  const leader = await findUser(group.leaderId);
+  return sendFeishuOpenTable({
+    webhook: group.feishuWebhook,
+    groupName: group.name,
+    leaderName: leader?.name || '团长',
+    code: group.code,
+    shareUrl: buildInviteUrl(shareOrigin, group.code),
+  });
+}
+
+/** 出菜/失败结果只通知一次，避免多人轮询重复发飞书 */
+async function maybeNotifyFeishuOutcome(code) {
+  const group = await findGroup(code);
+  if (!group?.feishuWebhook || !group.session) return { skipped: true };
+  const { status, feishuResultSent } = group.session;
+  if (feishuResultSent) return { skipped: true };
+  if (status !== 'completed' && status !== 'failed') return { skipped: true };
+
+  let payload = null;
+  await db.write((d) => {
+    const g = d.groups.find((x) => x.code === String(code || '').toUpperCase());
+    if (!g?.feishuWebhook || !g.session || g.session.feishuResultSent) return;
+    if (g.session.status === 'completed') {
+      g.session.feishuResultSent = true;
+      payload = {
+        kind: 'result',
+        webhook: g.feishuWebhook,
+        groupName: g.name,
+        winner: g.session.result?.winner || null,
+        forced: Boolean(g.session.result?.forced),
+      };
+      pushNotify(g, {
+        type: 'feishu',
+        title: '结果已通知飞书群',
+        message: g.session.result?.winner
+          ? `${g.session.result.winner.emoji} ${g.session.result.winner.name}`
+          : '今晚结果已发到飞书群',
+      });
+    } else if (g.session.status === 'failed') {
+      g.session.feishuResultSent = true;
+      payload = {
+        kind: 'failed',
+        webhook: g.feishuWebhook,
+        groupName: g.name,
+      };
+      pushNotify(g, {
+        type: 'feishu',
+        title: '结果已通知飞书群',
+        message: '开抽失败已发到飞书群',
+      });
+    }
+  });
+  if (!payload) return { skipped: true };
+  if (payload.kind === 'result') {
+    return sendFeishuResult({
+      webhook: payload.webhook,
+      groupName: payload.groupName,
+      winner: payload.winner,
+      forced: payload.forced,
+    });
+  }
+  return sendFeishuFailed({
+    webhook: payload.webhook,
+    groupName: payload.groupName,
+  });
+}
+
+export async function updateFeishuWebhook(code, userId, webhook, origin) {
+  const group = await findGroup(code);
+  if (!group || !requireLeader(group, userId)) return { error: '只有团长能设置飞书通知' };
+  const parsed = parseFeishuWebhook(webhook);
+  if (parsed.error) return { error: parsed.error };
+  const shareOrigin = await rememberShareOrigin(group.code, origin);
+  await db.write((d) => {
+    const g = d.groups.find((x) => x.code === group.code);
+    g.feishuWebhook = parsed.webhook;
+    if (shareOrigin) g.shareOrigin = shareOrigin;
+    g.updatedAt = Date.now();
+  });
+  return { group: await snapshot(await findGroup(group.code), userId) };
+}
+
+export async function notifyFeishu(code, userId, origin) {
+  const group = await findGroup(code);
+  if (!group || !requireLeader(group, userId)) return { error: '只有团长能发飞书通知' };
+  if (!group.feishuWebhook) return { error: '还没设置飞书 Webhook' };
+  await rememberShareOrigin(group.code, origin);
+  const fresh = await findGroup(code);
+  const sent = await notifyGroupOpened(fresh, origin);
+  if (sent?.error) return { error: sent.error };
+  await db.write((d) => {
+    const g = d.groups.find((x) => x.code === fresh.code);
+    pushNotify(g, {
+      type: 'feishu',
+      title: '已通知飞书群',
+      message: '开桌链接已发到飞书群',
+    });
+  });
+  return { ok: true, group: await snapshot(await findGroup(code), userId) };
+}
+
+export async function startSession(code, userId, origin) {
   const group = await findGroup(code);
   const user = await findUser(userId);
   if (!group || !requireLeader(group, userId)) return { error: '只有团长能发起点餐' };
@@ -288,6 +417,7 @@ export async function startSession(code, userId) {
   }
   const data = await db.read();
   if (getGroupMenus(data, group).length < 2) return { error: '至少先录入两道菜' };
+  await rememberShareOrigin(group.code, origin);
   await db.write((d) => {
     const g = d.groups.find((x) => x.code === code);
     g.session = {
@@ -305,6 +435,18 @@ export async function startSession(code, userId) {
       message: `${user.name} 敲了敲桌子：今晚吃啥，大家先点个心仪的。`,
     });
   });
+  const fresh = await findGroup(code);
+  const sent = await notifyGroupOpened(fresh, origin);
+  if (sent?.ok) {
+    await db.write((d) => {
+      const g = d.groups.find((x) => x.code === fresh.code);
+      pushNotify(g, {
+        type: 'feishu',
+        title: '已通知飞书群',
+        message: '开桌链接已发到飞书群',
+      });
+    });
+  }
   return { group: await snapshot(await findGroup(code), userId) };
 }
 
@@ -423,7 +565,10 @@ export async function readySession(code, userId) {
   const fresh = await findGroup(code);
   const memberIds = fresh.members.map((m) => m.userId);
   const allReady = memberIds.every((id) => fresh.session.ready.includes(id));
-  if (allReady) await drawNow(code, false);
+  if (allReady) {
+    await drawNow(code, false);
+    await maybeNotifyFeishuOutcome(code);
+  }
   return { group: await snapshot(await findGroup(code), userId) };
 }
 
@@ -433,6 +578,7 @@ export async function forceDrawSession(code, userId) {
     return { error: '现在不能强抽' };
   }
   await drawNow(code, true);
+  await maybeNotifyFeishuOutcome(code);
   return { group: await snapshot(await findGroup(code), userId) };
 }
 

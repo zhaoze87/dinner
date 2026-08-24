@@ -36,6 +36,9 @@ export default function GroupRoom() {
   const [kitchen, setKitchen] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [copied, setCopied] = useState(false);
+  const [feishuUrl, setFeishuUrl] = useState('');
+  const [feishuBusy, setFeishuBusy] = useState(false);
+  const [feishuMsg, setFeishuMsg] = useState('');
 
   const isLeader = group?.leaderId === user?.id;
   const session = group?.session;
@@ -169,6 +172,38 @@ export default function GroupRoom() {
     }
   }
 
+  async function saveFeishu(event) {
+    event.preventDefault();
+    setFeishuBusy(true);
+    setFeishuMsg('');
+    setError('');
+    try {
+      const next = await roomActions.saveFeishu(code, user.id, feishuUrl.trim());
+      setGroup(next);
+      setFeishuUrl('');
+      setFeishuMsg(next.hasFeishuWebhook ? '飞书 Webhook 已保存' : '已清空飞书 Webhook');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setFeishuBusy(false);
+    }
+  }
+
+  async function sendFeishu() {
+    setFeishuBusy(true);
+    setFeishuMsg('');
+    setError('');
+    try {
+      const next = await roomActions.notifyFeishu(code, user.id);
+      if (next) setGroup(next);
+      setFeishuMsg('已发到飞书群');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setFeishuBusy(false);
+    }
+  }
+
   // 分享链接打开、尚未报名字：只填称呼即可入座
   if (!user?.id) {
     return (
@@ -251,6 +286,34 @@ export default function GroupRoom() {
               {copied ? '链接已复制' : '分享邀请链接'}
             </button>
           </div>
+          {isLeader ? (
+            <form className="feishu-box" onSubmit={saveFeishu}>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>飞书群 Webhook</div>
+              {group.hasFeishuWebhook ? (
+                <div className="feishu-status">已接入 · {group.feishuWebhookMasked || '机器人已配置'}</div>
+              ) : (
+                <div className="feishu-status muted">未设置，发起点餐时不会通知飞书群</div>
+              )}
+              <input
+                type="password"
+                value={feishuUrl}
+                onChange={(e) => setFeishuUrl(e.target.value)}
+                placeholder="粘贴飞书自定义机器人 Webhook"
+                autoComplete="off"
+              />
+              <div className="row" style={{ marginTop: 8, gap: 8 }}>
+                <button className="btn btn-ghost" type="submit" disabled={feishuBusy}>
+                  {feishuUrl.trim() ? '保存' : (group.hasFeishuWebhook ? '清空' : '保存')}
+                </button>
+                {group.hasFeishuWebhook ? (
+                  <button className="btn btn-gold" type="button" disabled={feishuBusy} onClick={sendFeishu}>
+                    通知飞书群
+                  </button>
+                ) : null}
+              </div>
+              {feishuMsg ? <p className="hint" style={{ marginTop: 8 }}>{feishuMsg}</p> : null}
+            </form>
+          ) : null}
         </div>
         <div>
           <div className="kicker">在座</div>

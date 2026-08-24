@@ -44,7 +44,8 @@ async function act(path, body) {
 }
 
 export const roomActions = {
-  start: (code, userId) => act(`/api/groups/${code}/session/start`, { userId }),
+  start: (code, userId) =>
+    act(`/api/groups/${code}/session/start`, { userId, origin: window.location.origin }),
   vote: (code, userId, menuId) => act(`/api/groups/${code}/session/vote`, { userId, menuId }),
   lock: (code, userId) => act(`/api/groups/${code}/session/lock`, { userId }),
   ready: (code, userId) => act(`/api/groups/${code}/session/ready`, { userId }),
@@ -54,5 +55,15 @@ export const roomActions = {
     api(`/api/groups/${code}/members/${memberId}?userId=${encodeURIComponent(userId)}`, {
       method: 'DELETE',
       body: { userId },
+    }).then((data) => data.group),
+  saveFeishu: (code, userId, webhook) =>
+    api(`/api/groups/${code}/feishu`, {
+      method: 'PUT',
+      body: { userId, webhook, origin: window.location.origin },
+    }).then((data) => data.group),
+  notifyFeishu: (code, userId) =>
+    api(`/api/groups/${code}/feishu/notify`, {
+      method: 'POST',
+      body: { userId, origin: window.location.origin },
     }).then((data) => data.group),
 };

@@ -369,6 +369,28 @@ a {
   color: var(--gold);
 }
 
+.feishu-box {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed rgba(233, 196, 106, 0.25);
+}
+
+.feishu-box input {
+  width: 100%;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.feishu-status {
+  font-size: 12px;
+  color: var(--gold);
+  word-break: break-all;
+}
+
+.feishu-status.muted {
+  color: var(--muted);
+}
+
 .member-list {
   display: flex;
   flex-direction: column;

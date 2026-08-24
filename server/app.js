@@ -21,6 +21,8 @@ import {
   updateMenu,
   deleteMenu,
   leaderMenus,
+  updateFeishuWebhook,
+  notifyFeishu,
 } from './services.js';
 
 const app = express();
@@ -98,7 +100,24 @@ app.delete('/api/groups/:code/members/:memberId', asyncRoute(async (req, res) =>
 }));
 
 app.post('/api/groups/:code/session/start', asyncRoute(async (req, res) => {
-  const result = await startSession(req.params.code, req.body?.userId);
+  const result = await startSession(req.params.code, req.body?.userId, req.body?.origin);
+  if (fail(res, result, result.error?.includes('团长') ? 403 : 400)) return;
+  res.json(result);
+}));
+
+app.put('/api/groups/:code/feishu', asyncRoute(async (req, res) => {
+  const result = await updateFeishuWebhook(
+    req.params.code,
+    req.body?.userId,
+    req.body?.webhook,
+    req.body?.origin,
+  );
+  if (fail(res, result, result.error?.includes('团长') ? 403 : 400)) return;
+  res.json(result);
+}));
+
+app.post('/api/groups/:code/feishu/notify', asyncRoute(async (req, res) => {
+  const result = await notifyFeishu(req.params.code, req.body?.userId, req.body?.origin);
   if (fail(res, result, result.error?.includes('团长') ? 403 : 400)) return;
   res.json(result);
 }));
