@@ -9,6 +9,11 @@ import {
 } from './menus.js';
 import { computeWeights, pickWeighted, localDate, WEIGHT_RULES } from './engine.js';
 import {
+  buildDrawAudit,
+  resolveHistoryAudit,
+  backfillHistoryAudits,
+} from '../shared/drawAudit.js';
+import {
   parseFeishuWebhook,
   parseShareOrigin,
   buildInviteUrl,
@@ -93,10 +98,69 @@ function publicWeightRows(menus, history) {
   return computeWeights(menus, [], history);
 }
 
-function redactResult(result, menus, history) {
+function ensureVoteLedger(group) {
+  if (!Array.isArray(group.voteLedger)) group.voteLedger = [];
+  return group.voteLedger;
+}
+
+function myVoteCountsFromLedger(ledger, viewerId) {
+  const counts = {};
+  if (!viewerId) return counts;
+  for (const v of ledger) {
+    if (v.userId !== viewerId) continue;
+    counts[v.menuId] = (counts[v.menuId] || 0) + 1;
+  }
+  return counts;
+}
+
+function upsertSessionVote(group, userId, menuId) {
+  const sessionId = group.session?.id;
+  if (!sessionId) return;
+  const ledger = ensureVoteLedger(group);
+  group.session.votes = group.session.votes.filter((v) => v.userId !== userId);
+  group.session.votes.push({ userId, menuId, at: Date.now() });
+  // 同一轮可改选：只保留本轮对本用户的一条；往轮累计保留
+  const next = ledger.filter((v) => !(v.userId === userId && v.sessionId === sessionId));
+  next.push({ userId, menuId, sessionId, at: Date.now() });
+  group.voteLedger = next;
+}
+
+function clearVotesForMenu(group, menuId) {
+  ensureVoteLedger(group);
+  group.voteLedger = group.voteLedger.filter((v) => v.menuId !== menuId);
+  if (group.session?.votes) {
+    group.session.votes = group.session.votes.filter((v) => v.menuId !== menuId);
+  }
+}
+
+function purgeMemberVotes(group, memberId) {
+  purgeMemberFromSession(group, memberId);
+  if (Array.isArray(group.voteLedger)) {
+    group.voteLedger = group.voteLedger.filter((v) => v.userId !== memberId);
+  }
+}
+
+function publicAudit(audit) {
+  if (!audit) return null;
+  // 全员看同一份权重明细；不回传个人选票名单，避免反推谁选了什么
+  const { votes: _votes, ...rest } = audit;
+  return rest;
+}
+
+function redactResult(result) {
   if (!result) return null;
-  const { weights: _hidden, ...rest } = result;
-  return { ...rest, weights: publicWeightRows(menus, history) };
+  return {
+    ...result,
+    audit: publicAudit(result.audit),
+    // 开奖后权重快照全员一致
+    weights: result.weights || result.audit?.weights || null,
+  };
+}
+
+function historyItemForViewer(item, allHistory, menus) {
+  const audit = publicAudit(resolveHistoryAudit(item, allHistory, menus, item.audit || null));
+  const { audit: _drop, ...rest } = item;
+  return { ...rest, audit };
 }
 
 export async function snapshot(group, viewerId = null) {
@@ -113,6 +177,9 @@ export async function snapshot(group, viewerId = null) {
   const leader = users.find((u) => u.id === fresh.leaderId);
   const displayWeights = publicWeightRows(menus, fresh.history);
   const myVotes = viewerId ? votes.filter((v) => v.userId === viewerId) : [];
+  const isLeader = viewerId === fresh.leaderId;
+  const voteLedger = Array.isArray(fresh.voteLedger) ? fresh.voteLedger : [];
+  const myVoteCounts = myVoteCountsFromLedger(voteLedger, viewerId);
   return {
     id: fresh.id,
     code: fresh.code,
@@ -133,7 +200,9 @@ export async function snapshot(group, viewerId = null) {
     }),
     menus,
     menuOwnerId: fresh.leaderId,
-    history: [...fresh.history].sort((a, b) => b.at - a.at),
+    history: [...fresh.history]
+      .sort((a, b) => b.at - a.at)
+      .map((item) => historyItemForViewer(item, fresh.history, menus)),
     session: session
       ? {
           id: session.id,
@@ -145,15 +214,17 @@ export async function snapshot(group, viewerId = null) {
           votedUserIds: votes.map((v) => v.userId),
           voteCount: votes.length,
           ready: session.ready,
-          result: redactResult(session.result, menus, fresh.history),
+          result: redactResult(session.result),
+          // 投票期对外权重不含他人选票，避免从权重变化反推；个人加成由前端本地叠加
           weights: displayWeights,
         }
       : null,
     weights: session ? undefined : displayWeights,
+    myVoteCounts,
     rules: WEIGHT_RULES,
     today: localDate(),
     hasFeishuWebhook: Boolean(fresh.feishuWebhook),
-    feishuWebhookMasked: viewerId === fresh.leaderId ? maskWebhook(fresh.feishuWebhook) : '',
+    feishuWebhookMasked: isLeader ? maskWebhook(fresh.feishuWebhook) : '',
   };
 }
 
@@ -175,7 +246,7 @@ export async function kickMember(group, memberId) {
   await db.write((data) => {
     const g = data.groups.find((x) => x.id === group.id);
     g.members = g.members.filter((m) => m.userId !== memberId);
-    purgeMemberFromSession(g, memberId);
+    purgeMemberVotes(g, memberId);
     pushNotify(g, {
       type: 'member-kick',
       title: '有人被请离本桌',
@@ -239,6 +310,7 @@ export async function createGroup(userId, name) {
     updatedAt: Date.now(),
     members: [{ userId: user.id, joinedAt: Date.now() }],
     history: [],
+    voteLedger: [],
     session: null,
     notifies: [],
     presence: {},
@@ -459,8 +531,8 @@ export async function voteSession(code, userId, menuId) {
   if (!menu) return { error: '这道菜不在菜单上' };
   await db.write((d) => {
     const g = d.groups.find((x) => x.code === code);
-    g.session.votes = g.session.votes.filter((v) => v.userId !== userId);
-    g.session.votes.push({ userId, menuId, at: Date.now() });
+    ensureVoteLedger(g);
+    upsertSessionVote(g, userId, menuId);
     pushNotify(g, {
       type: 'vote',
       title: '有人已选中',
@@ -490,12 +562,18 @@ export async function lockSession(code, userId) {
 
 async function drawNow(code, forced) {
   const group = await findGroup(code);
-  const votes = group.session.votes;
+  const votes = Array.isArray(group.voteLedger) ? group.voteLedger : group.session.votes || [];
   const data = await db.read();
   const menus = getGroupMenus(data, group);
   const weights = computeWeights(menus, votes, group.history);
   const picked = pickWeighted(weights);
   const winner = menus.find((m) => m.id === picked.winnerId) || null;
+  const audit = buildDrawAudit({
+    weights,
+    votes,
+    winnerId: winner?.id || null,
+    forced,
+  });
 
   if (!winner) {
     await db.write((d) => {
@@ -505,6 +583,7 @@ async function drawNow(code, forced) {
         reason: 'no-eligible',
         forced,
         weights,
+        audit,
         at: Date.now(),
         duration: 0,
       };
@@ -526,6 +605,7 @@ async function drawNow(code, forced) {
     at: Date.now(),
     date: localDate(),
     forced,
+    audit,
   };
 
   await db.write((d) => {
@@ -535,12 +615,15 @@ async function drawNow(code, forced) {
       winnerId: winner.id,
       winner,
       weights,
+      audit,
       forced,
       at: record.at,
       duration: REVEAL_MS,
       revealAt: Date.now() + REVEAL_MS,
     };
     g.history.push(record);
+    // 抽中后清空该菜的全部累计选中
+    clearVotesForMenu(g, winner.id);
     pushNotify(g, {
       type: 'drawing',
       title: '转盘转起来了',
@@ -626,6 +709,9 @@ export async function deleteMenu(userId, menuId, actorId) {
   await db.write((data) => {
     const owner = data.users.find((u) => u.id === user.id);
     owner.menus = leaderMenus(data, user.id).filter((m) => m.id !== menuId);
+    for (const g of data.groups.filter((x) => x.leaderId === user.id)) {
+      clearVotesForMenu(g, menuId);
+    }
   });
   return { ok: true };
 }

@@ -21,6 +21,26 @@ function formatWhen(at) {
   });
 }
 
+/** 对外公开权重 + 仅自己累计选票加成（本地展示，不泄露他人选择） */
+function displayWeightForMenu(row, menu, myCount, voteBoost) {
+  const base = row?.base ?? menu.baseWeight ?? 0;
+  const pickedToday = Boolean(row?.pickedToday);
+  const recency = pickedToday ? 0 : (row?.recency ?? 1);
+  const count = Math.max(0, Number(myCount) || 0);
+  const personalBoost = count * voteBoost;
+  const weight = pickedToday ? 0 : Number(((base + personalBoost) * recency).toFixed(2));
+  const decayPct = pickedToday ? 100 : Math.round((1 - recency) * 100);
+  return {
+    base,
+    recency,
+    pickedToday,
+    myCount: count,
+    personalBoost,
+    weight,
+    decayPct,
+  };
+}
+
 function inviteLink(code) {
   return `${window.location.origin}/g/${encodeURIComponent(code)}`;
 }
@@ -39,13 +59,15 @@ export default function GroupRoom() {
   const [feishuUrl, setFeishuUrl] = useState('');
   const [feishuBusy, setFeishuBusy] = useState(false);
   const [feishuMsg, setFeishuMsg] = useState('');
+  const [auditId, setAuditId] = useState(null);
 
   const isLeader = group?.leaderId === user?.id;
   const session = group?.session;
   const myVote = session?.votes.find((v) => v.userId === user?.id);
   const myReady = session?.ready?.includes(user?.id);
   const weights = session?.weights || group?.weights || [];
-  const maxWeight = Math.max(1, ...weights.map((w) => w.weight));
+  const voteBoost = group?.rules?.VOTE_BOOST ?? 20;
+  const myVoteCounts = group?.myVoteCounts || {};
 
   useEffect(() => {
     if (!user?.id) return undefined;
@@ -348,7 +370,8 @@ export default function GroupRoom() {
           </div>
         </div>
         <p className="rules">
-          投票给喜欢的菜 +{group.rules.VOTE_BOOST} 权重。近 {group.rules.DECAY_DAYS} 天抽中过的会掉权，满 {group.rules.DECAY_DAYS} 天恢复。同一天不重复。
+          每轮选中 +{group.rules.VOTE_BOOST} 权重，未抽中会累计到下一轮；开奖时计入全员累计票，抽中后该菜累计清空。近{' '}
+          {group.rules.DECAY_DAYS} 天抽中过的会掉权，同一天不重复。他人选中次数仅自己可见。
         </p>
         <Link to="/" className="btn btn-ghost" onClick={clearRoom}>
           换一桌
@@ -381,7 +404,7 @@ export default function GroupRoom() {
           <div className="session-banner">
             <div>
               <b>团长敲桌了，先给心仪的菜加权重。</b>
-              <div className="rules">每人一道，可改选。选完后等团长打开转盘。其他人只知道你已选中，看不到你选了什么。</div>
+              <div className="rules">每人每轮一道，可改选。未中奖的选中会累计到下一轮；开奖计入全员累计，抽中后清空。其他人只知道你已选中，看不到你选了什么。</div>
             </div>
             <div>{(session.voteCount ?? session.votedUserIds?.length ?? session.votes.length)}/{group.members.length} 人已选</div>
           </div>
@@ -409,26 +432,38 @@ export default function GroupRoom() {
           {group.menus.map((menu) => {
             const row = weights.find((w) => w.menuId === menu.id);
             const picked = myVote?.menuId === menu.id;
+            const view = displayWeightForMenu(row, menu, myVoteCounts[menu.id] || 0, voteBoost);
             return (
               <button
                 key={menu.id}
                 type="button"
-                className={`dish ${session?.status === 'voting' ? 'pickable' : ''} ${picked ? 'picked' : ''} ${row?.pickedToday ? 'blocked' : ''}`}
+                className={`dish ${session?.status === 'voting' ? 'pickable' : ''} ${picked ? 'picked' : ''} ${view.pickedToday ? 'blocked' : ''}`}
                 onClick={() => session?.status === 'voting' && runAction(() => roomActions.vote(code, user.id, menu.id))}
               >
-                {row?.pickedToday ? <span className="today-badge">今日已中</span> : null}
+                {view.pickedToday ? <span className="today-badge">今日已中</span> : null}
+                {view.myCount > 0 ? <span className="vote-badge">我累计 ×{view.myCount}</span> : null}
                 <div className="dish-emoji">{menu.emoji}</div>
                 <h3>{menu.name}</h3>
                 <p>{menu.desc || menu.category}</p>
-                <div className="weight-bar">
-                  <span style={{ width: `${((row?.weight || 0) / maxWeight) * 100}%` }} />
+                <div
+                  className={`weight-bar ${view.decayPct > 0 ? 'decayed' : ''}`}
+                  title={view.pickedToday ? '今日已中，权重为 0' : `衰减进度 ${view.decayPct}%`}
+                >
+                  <span style={{ width: `${view.decayPct}%` }} />
                 </div>
                 <div className="meta">
-                  <span>基础权重 {row?.base ?? menu.baseWeight ?? 0}</span>
                   <span>
-                    {row?.pickedToday
+                    权重 {view.weight}
+                    {view.personalBoost
+                      ? `（含我的 +${Number((view.personalBoost * view.recency).toFixed(2))}）`
+                      : ''}
+                  </span>
+                  <span>
+                    {view.pickedToday
                       ? '今日已中'
-                      : `衰减 ${Math.round((row?.recency ?? 1) * 100)}%`}
+                      : view.decayPct === 0
+                        ? '未衰减'
+                        : `衰减 ${view.decayPct}%`}
                   </span>
                 </div>
               </button>
@@ -442,13 +477,59 @@ export default function GroupRoom() {
             <p className="rules">还没抽过。抽中过的菜会在这里留下油渍。</p>
           ) : (
             <div className="timeline">
-              {group.history.slice(0, 10).map((item) => (
-                <div className="stamp" key={item.id}>
-                  <div className="when">{formatWhen(item.at)}</div>
-                  <div style={{ fontSize: 22, margin: '6px 0' }}>{item.emoji}</div>
-                  <b>{item.name}</b>
-                </div>
-              ))}
+              {group.history.slice(0, 10).map((item) => {
+                const audit = item.audit;
+                const open = auditId === item.id;
+                const chance = audit ? `${(audit.winnerChance * 100).toFixed(1)}%` : null;
+                return (
+                  <button
+                    type="button"
+                    className={`stamp ${open ? 'open' : ''}`}
+                    key={item.id}
+                    onClick={() => setAuditId(open ? null : item.id)}
+                  >
+                    <div className="when">{formatWhen(item.at)}</div>
+                    <div style={{ fontSize: 22, margin: '6px 0' }}>{item.emoji}</div>
+                    <b>{item.name}</b>
+                    {item.forced ? <div className="stamp-tag">团长强抽</div> : null}
+                    {audit ? (
+                      <div className="stamp-audit-hint">
+                        {open ? '收起明细' : `查看权重 · ${chance}`}
+                      </div>
+                    ) : null}
+                    {open && audit ? (
+                      <div className="stamp-audit" onClick={(e) => e.stopPropagation()}>
+                        <div className="stamp-audit-meta">
+                          总票 {audit.voteTotal} · 总权重 {audit.total} · 中奖权重 {audit.winnerWeight}
+                          {audit.reconstructed ? ' · 无投票快照（按当时衰减重建）' : ''}
+                        </div>
+                        {[...audit.weights]
+                          .sort((a, b) => b.weight - a.weight)
+                          .map((row) => {
+                            const pct = audit.total > 0 && row.weight > 0
+                              ? `${((row.weight / audit.total) * 100).toFixed(1)}%`
+                              : '—';
+                            return (
+                              <div
+                                className={`stamp-audit-row ${row.menuId === item.menuId ? 'win' : ''}`}
+                                key={row.menuId}
+                              >
+                                <span>
+                                  {row.emoji} {row.name}
+                                  {row.voteCount ? ` · 票×${row.voteCount}` : ''}
+                                  {row.pickedToday ? ' · 当日已中' : ''}
+                                </span>
+                                <span>
+                                  {row.weight} / {pct}
+                                </span>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    ) : null}
+                  </button>
+                );
+              })}
             </div>
           )}
         </section>
@@ -507,7 +588,12 @@ export default function GroupRoom() {
                 <div className="result-hero">
                   {session.result.winner.emoji} {session.result.winner.name}
                 </div>
-                <p className="subtitle">今晚就它了。这道菜今天不会再被抽中，随后几天权重也会偏低。</p>
+                <p className="subtitle">
+                  今晚就它了。这道菜今天不会再被抽中，随后几天权重也会偏低。
+                  {session.result.audit
+                    ? ` 开奖瞬间概率 ${(session.result.audit.winnerChance * 100).toFixed(1)}%（共 ${session.result.audit.voteTotal} 票）。`
+                    : ''}
+                </p>
                 {isLeader ? (
                   <button className="btn btn-gold" type="button" onClick={() => runAction(() => roomActions.close(code, user.id))}>
                     收桌，回到菜单墙

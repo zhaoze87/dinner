@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -n server,client -c yellow,cyan \"npm run server\" \"npm run client\"",
-    "server": "node server/index.js",
+    "server": "nodemon server/index.js",
     "client": "vite",
     "build": "vite build",
     "start": "node server/index.js",
@@ -25,6 +25,7 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.2",
+    "nodemon": "^3.1.14",
     "vite": "^6.0.3"
   }
 }

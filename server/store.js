@@ -64,9 +64,29 @@ function loadFile() {
 
 function saveFile(data) {
   ensureFile();
-  const tmp = `${dbFile}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, dbFile);
+  const content = JSON.stringify(data, null, 2);
+  const tmp = `${dbFile}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, content);
+    try {
+      fs.renameSync(tmp, dbFile);
+    } catch {
+      // Windows 上 rename 覆盖已有文件可能 EPERM，直接写入主文件
+      fs.writeFileSync(dbFile, content);
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    fs.writeFileSync(dbFile, content);
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // ignore
+    }
+  }
 }
 
 // ── Unified load / save ───────────────────────────────────────────────────────
